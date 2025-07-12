@@ -1,0 +1,90 @@
+name: Fix Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Release version"
+        required: true
+
+jobs:
+  preparing:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: releases/${{github.event.inputs.release_version}}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: | 
+          npm ci
+          npm run lint
+          npm test
+  fix:
+    needs: preparing
+    runs-on: ubuntu-latest
+    env:
+      CONTAINER_RIGISTRY: ${{ secrets.CONTAINER_RIGISTRY }}
+      Y_TOKEN: ${{ secrets.Y_TOKEN }}
+      RELEASE_VERSION: ${{ github.event.inputs.release_version }}
+      FIX_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: releases/${{ env.RELEASE_VERSION }}
+          fetch-depth: 0  # Получаем полную историю коммитов
+      
+      - name: Get previous fix tag
+        id: prev_fix_tag
+        run: |
+          # Ищем последний тег фикса для этого релиза
+          PREV_FIX_TAG=$(git tag --list "v${RELEASE_VERSION}_fix*" --sort=-v:refname | head -n 1)
+          echo "prev_fix_tag=${PREV_FIX_TAG}" >> $GITHUB_OUTPUT
+      
+      - name: Build Docker image
+        run: |
+          docker build -t cr.yandex/${{ env.CONTAINER_RIGISTRY }}/app:${RELEASE_VERSION}_fix${FIX_NUMBER} -t cr.yandex/${{ env.CONTAINER_RIGISTRY }}/app:${RELEASE_VERSION}_latest .
+      
+      - name: Login to Yandex Container Registry
+        run: echo $Y_TOKEN | docker login --username oauth --password-stdin cr.yandex
+      
+      - name: Push Docker images
+        run: |
+          docker push cr.yandex/${{ env.CONTAINER_RIGISTRY }}/app:${RELEASE_VERSION}_fix${FIX_NUMBER}
+          docker push cr.yandex/${{ env.CONTAINER_RIGISTRY }}/app:${RELEASE_VERSION}_latest
+      
+      - name: Create fix tag
+        run: |
+          git tag v${RELEASE_VERSION}_fix${FIX_NUMBER}
+          git push origin v${RELEASE_VERSION}_fix${FIX_NUMBER}
+      
+      - name: Generate commit history
+        id: commit_history
+        run: |
+          if [ -n "${{ steps.prev_fix_tag.outputs.prev_fix_tag }}" ]; then
+            COMMITS=$(git log --pretty=format:"- %s (%h)" ${{ steps.prev_fix_tag.outputs.prev_fix_tag }}..HEAD)
+          else
+            COMMITS=$(git log --pretty=format:"- %s (%h)" v${RELEASE_VERSION}..HEAD)
+          fi
+          echo "COMMIT_HISTORY<<EOF" >> $GITHUB_ENV
+          echo "$COMMITS" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+      
+      - name: Comment to Issue
+        run: |
+          TZ="Europe/Moscow"
+          export TZ
+          
+          ISSUE_NUMBER=$(gh issue list --search "Release v${RELEASE_VERSION}" --json number --jq '.[0].number')
+          COMMENT_BODY=$(printf "Дата фикса: %s\nАвтор: %s\nDocker: cr.yandex/%s/app:%s_fix%s\n\nКоммиты:\n%s" \
+            "$(date +'%Y-%m-%d %H:%M:%S')" \
+            "${{ github.actor }}" \
+            "${{ env.CONTAINER_RIGISTRY }}" \
+            "${RELEASE_VERSION}" \
+            "${FIX_NUMBER}" \
+            "${{ env.COMMIT_HISTORY }}")
+          
+          gh issue comment $ISSUE_NUMBER --body "$COMMENT_BODY"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
