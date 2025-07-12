@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  preparing: 
+    runs-on: ubuntu-latest
+    steps: 
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install dependencies and run tests
+        run: | 
+          npm ci
+          npm run lint
+          npm test
+
+  release:
+    needs: preparing
+    runs-on: ubuntu-latest
+    env:
+      CONTAINER_RIGISTRY: ${{ secrets.CONTAINER_RIGISTRY }}
+      Y_TOKEN: ${{ secrets.Y_TOKEN }}
+      RELEASE_VERSION: ${{ github.run_number }}
+    
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get previous release tag
+        id: prev_tag
+        run: |
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          echo "prev_tag=${PREV_TAG}" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog to temp file
+        run: |
+          mkdir -p /tmp/changelog
+          echo -e "# v${RELEASE_VERSION}\n" > /tmp/changelog/CHANGELOG.md
+          
+          if [ -n "${{ steps.prev_tag.outputs.prev_tag }}" ]; then
+            git log --pretty=format:"- %s (%h)" ${{ steps.prev_tag.outputs.prev_tag }}..HEAD >> /tmp/changelog/CHANGELOG.md
+          else
+            git log --pretty=format:"- %s (%h)" >> /tmp/changelog/CHANGELOG.md
+          fi
+          
+          echo -e "\n" >> /tmp/changelog/CHANGELOG.md
+
+      - name: Create and checkout release branch
+        run: |
+          git checkout -b releases/${RELEASE_VERSION}
+          git push origin releases/${RELEASE_VERSION}
+
+      - name: Add changelog to release branch
+        run: |
+          cp /tmp/changelog/CHANGELOG.md .
+          git add CHANGELOG.md
+          git config --global user.name "GitHub Actions"
+          git config --global user.email "actions@github.com"
+          git commit -m "Add CHANGELOG.md for v${RELEASE_VERSION}"
+          git push origin releases/${RELEASE_VERSION}
+
+      - name: Create release tag from main
+        run: |
+          git checkout main
+          git tag v${RELEASE_VERSION}
+          git push origin v${RELEASE_VERSION}
+
+      - name: Build Docker image
+        run: |
+          docker build \
+            -t cr.yandex/${{ env.CONTAINER_RIGISTRY }}/app:${RELEASE_VERSION} \
+            -t cr.yandex/${{ env.CONTAINER_RIGISTRY }}/app:${RELEASE_VERSION}_latest .
+
+      - name: Login to Container Registry
+        run: |
+          echo $Y_TOKEN | docker login \
+            --username oauth \
+            --password-stdin cr.yandex
+      
+      - name: Push Docker images
+        run: |
+          docker push cr.yandex/${{ env.CONTAINER_RIGISTRY }}/app:${RELEASE_VERSION}
+          docker push cr.yandex/${{ env.CONTAINER_RIGISTRY }}/app:${RELEASE_VERSION}_latest 
+      
+      - name: Create GitHub Issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TZ="Europe/Moscow"
+          export TZ
+          
+          CHANGELOG_CONTENT=$(cat /tmp/changelog/CHANGELOG.md | head -n 20)
+          
+          gh issue create \
+            --title "Release v${RELEASE_VERSION}" \
+            --body "$(printf "Дата: %s\nАвтор: %s\nВерсия: %s\nDocker: cr.yandex/%s/app:%s\n\nCHANGELOG:\n%s" \
+              "$(date +'%Y-%m-%d %H:%M:%S')" \
+              "${{ github.actor }}" \
+              "${RELEASE_VERSION}" \
+              "${{ env.CONTAINER_RIGISTRY }}" \
+              "${RELEASE_VERSION}" \
+              "${CHANGELOG_CONTENT}")"
