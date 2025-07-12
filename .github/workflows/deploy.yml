@@ -1,0 +1,38 @@
+name: Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Release version"
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      CONTAINER_RIGISTRY: ${{ secrets.CONTAINER_RIGISTRY }}
+      SSH_KEY: ${{ secrets.SSH_KEY }}
+    steps:
+      - name: Проверить наличие образа
+        run: |
+          echo "Образ cr.yandex/${{ secrets.CONTAINER_RIGISTRY }}/app:${{ github.event.inputs.release_version }}_latest должен быть в Container Registry"
+      - name: Deploy to server
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: 89.169.184.28
+          username: kiryshka
+          key: ${{ secrets.SSH_KEY }}
+          script: |
+            docker stop $(docker ps -aq) || true
+            docker rm $(docker ps -aq) || true
+            docker pull cr.yandex/${{ secrets.CONTAINER_RIGISTRY }}/app:${{ github.event.inputs.release_version }}_latest
+            docker run -d --name shri-infra -p 3000:3000 cr.yandex/${{ secrets.CONTAINER_RIGISTRY }}/app:${{ github.event.inputs.release_version }}_latest
+      - uses: actions/checkout@v4
+      - name: Comment to Issue
+        run: |
+          MOSCOW_TIME=$(TZ="Europe/Moscow" date '+%Y-%m-%d %H:%M:%S %Z')
+          gh issue comment $(gh issue list --search "Release v${{ github.event.inputs.release_version }}" --json number --jq '.[0].number') \
+            --body $'Релиз v${{ github.event.inputs.release_version }} выкачен в прод: '"$MOSCOW_TIME"$'\nАвтор: '"${{ github.actor }}"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
